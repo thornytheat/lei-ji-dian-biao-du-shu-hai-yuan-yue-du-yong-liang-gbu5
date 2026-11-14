@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}账单批次 {{ run_id }} · {{ app_name }}{% endblock %}
+{% block crumb %}租户账单批次{% endblock %}
+{% block meta %}{% if run %}<span class="dot {{ 'err' if run.status == 'rejected' else 'ok' }}"></span>
+{{ run.status }} · {{ run.run_id }}{% endif %}{% endblock %}
+{% block actions %}
+{% if run and run.status != 'rejected' %}
+<a class="btn small" href="/api/billing/runs/{{ run.run_id }}/bills.csv">账单 CSV</a>
+<a class="btn secondary small" href="/api/billing/runs/{{ run.run_id }}/review.csv">复核 CSV</a>
+<a class="btn secondary small" href="/api/billing/runs/{{ run.run_id }}/reconcile.csv">对账 CSV</a>
+{% endif %}
+<a class="btn secondary small" href="/billing">回账单工作台</a>
+{% endblock %}
+
+{% block content %}
+{% if not run %}
+<div class="panel"><div class="panel-body empty">{{ error }}</div></div>
+{% elif run.status == 'rejected' %}
+<section class="panel">
+  <div class="panel-head"><h2>批次已整批拒绝</h2><span class="tag err">rejected</span></div>
+  <div class="panel-body">
+    <p class="page-sub">{{ run.error }}。未生成任何账单、未发布新版本，既有版本不受影响。</p>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead><tr><th>对象</th><th>字段</th><th>问题</th></tr></thead>
+        <tbody>
+        {% for p in run.problems %}
+          <tr><td class="mono">{{ p.meter_id or '—' }}</td><td>{{ p.field or '—' }}</td><td>{{ p.message }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% else %}
+{% set focus = run.focus %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">租户账单批次 {{ run.run_id }}</h1>
+    <p class="page-sub">
+      状态 <strong>{{ run.status }}</strong> · 输入指纹 <code>{{ run.input_sig }}</code>
+      {% if run.version_id %} · 发布版本 <code>{{ run.version_id }}</code>（旧版 {{ run.previous_version or '无' }} 已留存）{% endif %}
+      {% if run.replayed %} · <strong>幂等重试回放</strong>，未新增账单{% endif %}
+    </p>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi"><div class="k-label">账单张数</div><div class="k-value">{{ run.stats.bills }}</div><div class="k-note">{{ run.stats.tenants }} 租户 · {{ run.stats.meters }} 表</div></div>
+  <div class="kpi"><div class="k-label">账单合计 kWh</div><div class="k-value">{{ run.stats.billed_total | num1 }}</div><div class="k-note">与月度总表守恒</div></div>
+  <div class="kpi"><div class="k-label">换租分段区间</div><div class="k-value">{{ run.stats.split_intervals }}</div><div class="k-note">先分段再分摊</div></div>
+  <div class="kpi {{ 'err' if run.stats.reconcile_unbalanced else 'ok' }}"><div class="k-label">对账不平</div><div class="k-value">{{ run.stats.reconcile_unbalanced }}</div><div class="k-note">差额必须 0</div></div>
+  <div class="kpi"><div class="k-label">P1/P2/P3</div><div class="k-value">{{ run.stats.review_p1 }}/{{ run.stats.review_p2 }}/{{ run.stats.review_p3 }}</div><div class="k-note">复核项</div></div>
+</div>
+
+{% if focus %}
+<section class="panel">
+  <div class="panel-head"><h2>{{ focus.month }} 租户月度账单</h2><div class="panel-actions"><span class="tag">{{ focus.bills | length }} 张</span></div></div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>表号</th><th>租户</th><th class="num">总电量</th><th class="num">峰段</th><th class="num">谷段</th><th class="num">峰+谷</th><th class="num">偏差</th><th>分时</th></tr></thead>
+      <tbody>
+      {% for b in focus.bills %}
+        <tr>
+          <td class="mono">{{ b.meter_id }}</td>
+          <td>{{ b.tenant_name }} <span class="muted small">({{ b.tenant_id }})</span></td>
+          <td class="num">{{ b.total | num1 }}</td><td class="num">{{ b.peak | num1 }}</td><td class="num">{{ b.valley | num1 }}</td>
+          <td class="num">{{ b.tou.sum | num1 if b.tou.sum is not none else '—' }}</td>
+          <td class="num">{{ b.tou['diff'] | signed if b.tou['diff'] is not none else '—' }}</td>
+          <td>{% if b.tou.ok %}<span class="tag ok">通过</span>{% elif b.tou.status == 'mismatch' %}<span class="tag err">超差</span>{% else %}<span class="tag warn">缺数据</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>{{ focus.month }} 账单 ↔ 月度总表对账</h2></div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>表号</th><th class="num">租户账单合计</th><th class="num">月度总表</th><th class="num">差额</th><th>分摊租户</th><th>结论</th></tr></thead>
+      <tbody>
+      {% for r in focus.reconcile %}
+        <tr>
+          <td class="mono">{{ r.meter_id }}</td>
+          <td class="num">{{ r.billed_total | num1 }}</td><td class="num">{{ r.master_total | num1 }}</td>
+          <td class="num">{{ r.diff | signed }}</td>
+          <td class="small">{{ r.tenants | join(' / ') }}（{{ r.tenant_count }} 户）</td>
+          <td>{% if r.balanced %}<span class="tag ok">平衡</span>{% else %}<span class="tag err">不平</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel-actions"><span class="small muted">同一份分配结果同时驱动账单、复核清单与三份 CSV 下载，不存在第二套口径。</span></div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head"><h2>换租分段与分摊依据</h2><div class="panel-actions"><span class="tag">先分段、再分摊</span></div></div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>表号</th><th>类型</th><th>抄表区间</th><th>租户子段</th><th class="num">子段用量</th><th>切分读数</th><th>月度分摊</th></tr></thead>
+      <tbody>
+      {% for e in run.evidence %}
+        {% if e.subs %}
+        <tr>
+          <td class="mono">{{ e.meter_id }}</td>
+          <td>{{ e.kind_label }}</td>
+          <td class="small nowrap">{{ e.start }} → {{ e.end }}<br><span class="muted">{{ e.status }} · {{ e.usage | num1 }} kWh</span></td>
+          <td class="small">
+            {% for s in e.subs %}
+            <div><strong>{{ s.tenant_name }}</strong>（{{ s.tenant_id }}）<br>
+              <span class="muted">{{ s.start }} → {{ s.end }} · {{ s.days }} 天</span></div>
+            {% endfor %}
+          </td>
+          <td class="num small">
+            {% for s in e.subs %}<div>{{ s.usage | num1 }}</div>{% endfor %}
+          </td>
+          <td class="small">
+            {% for s in e.subs %}{% if s.cut_reading is not none %}
+            <div>{{ s.cut_reading | num1 }}<br><span class="muted">{{ s.cut_source }}</span></div>{% endif %}{% endfor %}
+          </td>
+          <td class="small">
+            {% for s in e.subs %}
+              <div class="muted">{{ s.tenant_id }}：
+                {% for p in s.proration.parts %}{{ p.month }} {{ p.share | num1 }}（{{ p.days }}/{{ s.proration.days }} 天）{% if not loop.last %}；{% endif %}{% endfor %}
+              </div>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endif %}
+      {% else %}
+        <tr><td colspan="7" class="muted">没有需要分段的区间。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>复核清单（{{ run.review | length }} 条）</h2>
+    <div class="panel-actions">
+      <span class="tag err">P1 {{ run.stats.review_p1 }}</span>
+      <span class="tag warn">P2 {{ run.stats.review_p2 }}</span>
+      <span class="tag">P3 {{ run.stats.review_p3 }}</span>
+    </div>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>月份</th><th>级别</th><th>表号</th><th>租户</th><th>类型</th><th>问题</th><th>建议动作</th></tr></thead>
+      <tbody>
+      {% for item in run.review %}
+        <tr>
+          <td class="nowrap">{{ item.month }}</td>
+          <td><span class="tag {{ 'err' if item.level == 'P1' else ('warn' if item.level == 'P2' else '') }}">{{ item.level_label }}</span></td>
+          <td class="mono">{{ item.meter_id }}</td>
+          <td class="small">{{ item.tenant_name or item.tenant_id or '—' }}</td>
+          <td class="small nowrap">{{ item.kind }}</td>
+          <td class="small">{{ item.summary }}</td>
+          <td class="small">{{ item.action }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7" class="muted">没有复核事项。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

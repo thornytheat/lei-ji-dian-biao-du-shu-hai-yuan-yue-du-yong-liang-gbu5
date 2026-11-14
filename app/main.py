@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import pipeline, proration, readings, seed, settings, store, summary
+from . import billing, leases as leases_mod, pipeline, proration, publisher, readings, seed, settings, store, summary
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
@@ -59,6 +59,17 @@ def load_data() -> tuple[list[dict], list[dict], list[dict]]:
         meters = store.all_meters(conn)
         changes = store.all_changes(conn)
     return rows, meters, changes
+
+
+def load_billing_data() -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
+    with store.session() as conn:
+        store.init_schema(conn)
+        rows = store.all_readings(conn)
+        meters = store.all_meters(conn)
+        changes = store.all_changes(conn)
+        leases = store.all_leases(conn)
+        handovers = store.all_handovers(conn)
+    return rows, meters, changes, leases, handovers
 
 
 def cache_key(rows: list[dict], meters: list[dict], changes: list[dict]) -> str:
@@ -112,6 +123,15 @@ class RestoreRequest(BaseModel):
     max_gap_days: int | None = None
 
 
+class BillingRequest(BaseModel):
+    month: str | None = Field(default=None, examples=["2025-10"])
+    meter_ids: list[str] = Field(default_factory=list)
+    full_scale: float | None = None
+    max_gap_days: int | None = None
+    idempotency_key: str | None = None
+    mode: str = "publish"  # publish（默认，原子发布）/ validate（只校验不落版本）
+
+
 # --------------------------------------------------------------------------- 页面
 
 
@@ -122,6 +142,8 @@ def health() -> dict:
         readings_count = store.count_readings(conn)
         meters_count = len(store.all_meters(conn))
         changes_count = store.count_changes(conn)
+        leases_count = store.count_leases(conn)
+        handovers_count = store.count_handovers(conn)
         span = store.reading_span(conn)
     return {
         "status": "ok",
@@ -129,6 +151,8 @@ def health() -> dict:
         "readings": readings_count,
         "meters": meters_count,
         "changes": changes_count,
+        "leases": leases_count,
+        "handovers": handovers_count,
         "readings_from": span["date_from"],
         "readings_to": span["date_to"],
     }
@@ -147,6 +171,10 @@ def index(request: Request) -> HTMLResponse:
     months = ledger["month_order"] if ledger else []
     with store.session() as conn:
         runs = store.list_runs(conn, limit=6)
+        lease_count = store.count_leases(conn)
+        handover_count = store.count_handovers(conn)
+        billing_runs = store.list_billing_runs(conn, limit=4)
+        active_version = store.active_billing_version(conn)
     context = base_context(
         request,
         page="index",
@@ -159,6 +187,10 @@ def index(request: Request) -> HTMLResponse:
         month_count=len(months),
         monitored=ledger["monitored"] if ledger else [],
         latest_month=months[-1] if months else "",
+        lease_count=lease_count,
+        handover_count=handover_count,
+        billing_runs=billing_runs,
+        active_version=active_version,
         incidents=[
             {"module": "换表/回绕识别", "count": stats.get("meter_changes", 0), "unit": "次换表分段",
              "detail": "旧表拆表读数 + 新表装表读数两段相加"},
@@ -267,6 +299,8 @@ def api_import_sample() -> JSONResponse:
             "readings": store.count_readings(conn),
             "meters": len(store.all_meters(conn)),
             "changes": store.count_changes(conn),
+            "leases": store.count_leases(conn),
+            "handovers": store.count_handovers(conn),
         }
     analyze_all(force=True)
     return JSONResponse(
@@ -527,3 +561,248 @@ def api_review() -> Response:
     except pipeline.PipelineError as exc:
         raise pipeline_error(exc) from exc
     return _csv_response(summary.review_csv(ledger["review"]), "metercalc-review-all.csv")
+
+
+# --------------------------------------------------------------------------- 租约 / 交接读数导入
+
+
+def _decode_upload(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return raw.decode("gb18030")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=400, detail="文件编码无法识别，请另存为 UTF-8 或 GBK") from exc
+
+
+@app.post("/api/tenants/leases")
+async def api_import_leases(file: UploadFile = File(...)) -> JSONResponse:
+    text = _decode_upload(await file.read())
+    try:
+        parsed = leases_mod.load_lease_files(text)
+    except leases_mod.BillingError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": exc.message, "problems": exc.problems})
+    now = now_iso()
+    with store.session() as conn:
+        store.init_schema(conn)
+        count = store.replace_leases(conn, parsed["leases"])
+        store.add_event(conn, "lease_import", f"导入租约 {count} 条（{file.filename or '上传文件'}）",
+                        {"count": count}, now)
+    return JSONResponse(status_code=200, content={"ok": True, "filename": file.filename, "leases": count})
+
+
+@app.post("/api/tenants/handovers")
+async def api_import_handovers(file: UploadFile = File(...)) -> JSONResponse:
+    text = _decode_upload(await file.read())
+    try:
+        parsed = leases_mod.load_handover_files(text)
+    except leases_mod.BillingError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": exc.message, "problems": exc.problems})
+    now = now_iso()
+    with store.session() as conn:
+        store.init_schema(conn)
+        count = store.replace_handovers(conn, parsed["handovers"])
+        store.add_event(conn, "handover_import", f"导入交接读数 {count} 条（{file.filename or '上传文件'}）",
+                        {"count": count}, now)
+    return JSONResponse(status_code=200, content={"ok": True, "filename": file.filename, "handovers": count})
+
+
+@app.get("/api/tenants/leases")
+def api_list_leases() -> dict:
+    with store.session() as conn:
+        store.init_schema(conn)
+        leases = store.all_leases(conn)
+    return {"ok": True, "leases": leases, "count": len(leases)}
+
+
+@app.get("/api/tenants/handovers")
+def api_list_handovers() -> dict:
+    with store.session() as conn:
+        store.init_schema(conn)
+        handovers = store.all_handovers(conn)
+    return {"ok": True, "handovers": handovers, "count": len(handovers)}
+
+
+# --------------------------------------------------------------------------- 租户账单（原子发布）
+
+
+def _billing_error(exc: leases_mod.BillingError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status,
+        content={"ok": False, "error": exc.message, "problems": exc.problems, "rejected": True},
+    )
+
+
+@app.post("/api/billing/runs")
+def api_billing_run(payload: BillingRequest = Body(...)) -> JSONResponse:
+    if payload.month:
+        try:
+            proration.parse_month(payload.month)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.mode not in ("publish", "validate"):
+        raise HTTPException(status_code=400, detail="mode 只支持 publish / validate")
+    full_scale = payload.full_scale or settings.DEFAULT_FULL_SCALE
+    if full_scale <= 0:
+        raise HTTPException(status_code=400, detail=f"量程必须为正数，实际 {full_scale}")
+    max_gap_days = payload.max_gap_days or settings.MAX_GAP_DAYS
+    if max_gap_days < 2:
+        raise HTTPException(status_code=400, detail="缺口阈值至少 2 天")
+
+    rows, meters, changes, leases, handovers = load_billing_data()
+    if not rows:
+        raise HTTPException(status_code=400, detail="读数库为空，请先导入读数 CSV 或 /api/import/sample")
+    with store.session() as conn:
+        store.init_schema(conn)
+        try:
+            result = publisher.publish_billing(
+                conn,
+                rows=rows, meters=meters, changes=changes, leases=leases, handovers=handovers,
+                month=payload.month, meter_ids=payload.meter_ids,
+                full_scale=full_scale, max_gap_days=max_gap_days,
+                tou_tolerance=settings.TOU_TOLERANCE,
+                idempotency_key=payload.idempotency_key,
+                mode=payload.mode,
+            )
+        except leases_mod.BillingError as exc:
+            # 整批拒绝：publisher 已在同事务写入 rejected 批次（无账单无版本），旧 active 版本不受影响
+            return _billing_error(exc)
+
+    if result.get("publish_failed"):
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "rejected": False, "error": result["error"],
+                     "problems": [{"field": "publish", "message": result["detail"]}],
+                     "run_id": result["run_id"]},
+        )
+
+    focus = result.get("focus")
+    return JSONResponse(
+        status_code=201 if result["status"] == "published" else 200,
+        content={
+            "ok": True,
+            "replayed": result.get("replayed", False),
+            "run_id": result["run_id"],
+            "version_id": result.get("version_id"),
+            "previous_version": result.get("previous_version"),
+            "status": result["status"],
+            "mode": result["mode"],
+            "month": payload.month,
+            "input_sig": result["input_sig"],
+            "meters": result["selected"],
+            "stats": result["stats"],
+            "totals": focus["totals"] if focus else None,
+            "bills": focus["bills"] if focus else result["bills"],
+            "review": focus["review"] if focus else result["review"],
+            "reconcile": focus["reconcile"] if focus else result["reconcile"],
+            "result_url": f"/billing/runs/{result['run_id']}",
+            "export_url": f"/api/billing/runs/{result['run_id']}/bills.csv",
+        },
+    )
+
+
+@app.get("/api/billing/runs")
+def api_billing_runs() -> dict:
+    with store.session() as conn:
+        store.init_schema(conn)
+        runs = store.list_billing_runs(conn, limit=30)
+        versions = store.list_billing_versions(conn, limit=10)
+        active = store.active_billing_version(conn)
+    return {"ok": True, "runs": runs, "versions": versions, "active_version": active}
+
+
+@app.get("/api/billing/runs/{run_id}")
+def api_billing_run_detail(run_id: str) -> dict:
+    with store.session() as conn:
+        store.init_schema(conn)
+        run = store.load_billing_run(conn, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"账单批次 {run_id} 不存在")
+    return {"ok": True, "run": run}
+
+
+@app.get("/api/billing/active")
+def api_billing_active(month: str | None = None) -> dict:
+    with store.session() as conn:
+        store.init_schema(conn)
+        version = store.active_billing_version(conn, month)
+        if not version:
+            return {"ok": True, "active": None, "bills": []}
+        bills = store.bills_of_version(conn, version["version_id"])
+    return {"ok": True, "active": version, "bills": bills}
+
+
+@app.get("/api/billing/runs/{run_id}/bills.csv")
+def api_billing_run_bills_csv(run_id: str) -> Response:
+    with store.session() as conn:
+        store.init_schema(conn)
+        run = store.load_billing_run(conn, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"账单批次 {run_id} 不存在")
+    if run.get("status") == "rejected":
+        raise HTTPException(status_code=409, detail=f"账单批次 {run_id} 已被整批拒绝，没有可下载账单")
+    scope = run.get("month") or None
+    bills = [b for b in run["bills"] if not scope or b["month"] == scope]
+    return _csv_response(billing.bills_csv(bills), f"metercalc-tenant-bills-{scope or 'all'}.csv")
+
+
+@app.get("/api/billing/runs/{run_id}/review.csv")
+def api_billing_run_review_csv(run_id: str) -> Response:
+    with store.session() as conn:
+        store.init_schema(conn)
+        run = store.load_billing_run(conn, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"账单批次 {run_id} 不存在")
+    if run.get("status") == "rejected":
+        raise HTTPException(status_code=409, detail=f"账单批次 {run_id} 已被整批拒绝，没有复核清单")
+    scope = run.get("month") or None
+    items = [i for i in run["review"] if not scope or i["month"] == scope]
+    return _csv_response(billing.review_csv(items), f"metercalc-tenant-review-{scope or 'all'}.csv")
+
+
+@app.get("/api/billing/runs/{run_id}/reconcile.csv")
+def api_billing_run_reconcile_csv(run_id: str) -> Response:
+    with store.session() as conn:
+        store.init_schema(conn)
+        run = store.load_billing_run(conn, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"账单批次 {run_id} 不存在")
+    if run.get("status") == "rejected":
+        raise HTTPException(status_code=409, detail=f"账单批次 {run_id} 已被整批拒绝，没有对账结果")
+    scope = run.get("month") or None
+    rows = [r for r in run["reconcile"] if not scope or r["month"] == scope]
+    return _csv_response(billing.reconcile_csv(rows),
+                         f"metercalc-reconcile-{scope or 'all'}.csv")
+
+
+# --------------------------------------------------------------------------- 租户账单页面
+
+
+@app.get("/billing", response_class=HTMLResponse)
+def billing_page(request: Request) -> HTMLResponse:
+    rows, meters, changes, leases, handovers = load_billing_data()
+    with store.session() as conn:
+        runs = store.list_billing_runs(conn, limit=12)
+        versions = store.list_billing_versions(conn, limit=8)
+        active_version = store.active_billing_version(conn)
+        events = store.list_events(conn, limit=12)
+    months = sorted({r["read_at"].isoformat()[:7] for r in rows}) if rows else []
+    context = base_context(
+        request, page="billing", active="billing",
+        meters=meters, readings_rows=len(rows), leases=leases, handovers=handovers,
+        months=months, runs=runs, versions=versions, active_version=active_version, events=events,
+    )
+    return templates.TemplateResponse(request, "billing.html", context)
+
+
+@app.get("/billing/runs/{run_id}", response_class=HTMLResponse)
+def billing_result_page(request: Request, run_id: str) -> HTMLResponse:
+    with store.session() as conn:
+        store.init_schema(conn)
+        run = store.load_billing_run(conn, run_id)
+    context = base_context(
+        request, page="billing", active="billing", run=run, run_id=run_id,
+        error=None if run else f"账单批次 {run_id} 不存在，请回到租户账单工作台重新执行",
+    )
+    return templates.TemplateResponse(request, "billing_result.html", context)

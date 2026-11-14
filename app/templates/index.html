@@ -72,6 +72,42 @@
       </div>
     </section>
 
+    <section class="panel" style="margin-top:12px">
+      <div class="panel-head">
+        <h2>租户账单与换租分摊</h2>
+        <div class="panel-actions"><span class="tag">租约 {{ lease_count }} 条 · 交接 {{ handover_count }} 条</span></div>
+      </div>
+      <div class="panel-body tight">
+        <p class="small" style="margin-top:2px">
+          表计换租后按<strong>租约生效时段</strong>拆分用量：换租日落在抄表区间内时，先凭交接读数切成租户子区间，再各自分摊到月份。
+          租约重叠、断档或缺少交接读数时整批拒绝；账单、复核清单与 CSV 下载共用同一份分配结果，每表每月对账差额必须 0.00 kWh。
+        </p>
+        <p>
+          <a class="btn small" href="/billing">打开租户账单工作台</a>
+          {% if active_version %}
+          <span class="small muted" style="margin-left:8px">当前生效版本 <code>{{ active_version.version_id }}</code></span>
+          {% endif %}
+        </p>
+        {% if billing_runs %}
+        <div class="table-wrap auto">
+          <table class="dense">
+            <thead><tr><th>账单批次</th><th>月份</th><th>状态</th><th>时间</th></tr></thead>
+            <tbody>
+            {% for run in billing_runs %}
+              <tr>
+                <td><a href="/billing/runs/{{ run.run_id }}"><code>{{ run.run_id }}</code></a></td>
+                <td>{{ run.month or '全期' }}</td>
+                <td><span class="tag {{ 'err' if run.status == 'rejected' else ('ok' if run.status == 'published' else '') }}">{{ run.status }}</span></td>
+                <td class="small muted">{{ run.created_at }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      </div>
+    </section>
+
     <details class="help" style="margin-top:12px">
       <summary>业务背景、内置场景、表计台账与演示步骤</summary>
 

@@ -1,0 +1,348 @@
+{% extends "base.html" %}
+{% block title %}租户账单与换租 · {{ app_name }}{% endblock %}
+{% block crumb %}租户账单与换租{% endblock %}
+{% block meta %}<span class="dot ok"></span>
+读数 {{ readings_rows }} 行 · 租约 {{ leases | length }} 条 · 交接读数 {{ handovers | length }} 条{% endblock %}
+{% block actions %}
+<button type="submit" form="bill-form" class="btn small" id="bill-submit-top">生成并发布账单</button>
+<a class="btn secondary small" href="/review">月度总表台账</a>
+{% endblock %}
+{% block status_left %}口径：先按交接读数分段、再按月分摊；账单 / 复核 / 下载同一份分配结果；发布失败保留旧版{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">租户账单与换租分摊</h1>
+    <p class="page-sub">
+      表计换租后按<strong>租约生效时段</strong>拆分用量：换租日落在抄表区间内时，先凭交接读数切成租户子区间，再各自分摊到月份。
+      租约重叠、断档或缺少交接读数时<strong>整批拒绝</strong>；新结果完整校验通过后一次性切换版本，发布失败保留旧版，同批重试不新增账单。
+    </p>
+  </div>
+</div>
+
+<div class="split">
+  <section class="panel pane-sticky" style="max-height:calc(100vh - 206px)">
+    <div class="panel-head">
+      <h2>账单任务</h2>
+      <div class="panel-actions"><span class="tag">原子发布</span></div>
+    </div>
+    <div class="panel-body">
+      <form id="bill-form" data-endpoint="/api/billing/runs">
+        <div class="field">
+          <label for="bill-month">账单月份（留空 = 全期）</label>
+          <select id="bill-month" name="month">
+            <option value="">全期（12 个月）</option>
+            {% for m in months %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>参与表计（默认全部）</label>
+          <div class="checklist">
+            {% for meter in meters %}
+            <label class="check">
+              <input type="checkbox" name="meter_ids" value="{{ meter.meter_id }}" checked>
+              <span>{{ meter.meter_id }} · {{ meter.name }}</span>
+              <span class="muted small">{{ meter.location }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="field">
+          <label for="idem">幂等键（同键重试返回首个批次，不重复出账）</label>
+          <input type="text" id="idem" name="idempotency_key" placeholder="例如 batch-2026-03-001，可留空">
+        </div>
+        <div class="field">
+          <label>执行模式</label>
+          <label class="check"><input type="radio" name="mode" value="publish" checked>
+            <span>publish：校验 + 原子发布新版本</span></label>
+          <label class="check"><input type="radio" name="mode" value="validate">
+            <span>validate：只校验不落版本（试算）</span></label>
+        </div>
+      </form>
+
+      <div class="panel-body flush" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+        <form id="lease-form" data-endpoint="/api/tenants/leases" enctype="multipart/form-data">
+          <div class="field">
+            <label for="lease-file">租约 JSON 上传（整体替换）</label>
+            <input type="file" id="lease-file" name="file" accept=".json,application/json">
+          </div>
+          <button type="submit" class="secondary small">导入租约并校验</button>
+        </form>
+        <form id="handover-form" data-endpoint="/api/tenants/handovers" enctype="multipart/form-data" style="margin-top:8px">
+          <div class="field">
+            <label for="handover-file">交接读数 JSON 上传（整体替换）</label>
+            <input type="file" id="handover-file" name="file" accept=".json,application/json">
+          </div>
+          <button type="submit" class="secondary small">导入交接读数并校验</button>
+        </form>
+        <div class="alert alert-error" id="import-error" hidden></div>
+        <div class="alert alert-info" id="import-notice" hidden></div>
+      </div>
+
+      <div class="alert alert-error" id="bill-error" hidden></div>
+
+      <details class="help" style="margin-top:10px">
+        <summary>换租分摊与发布口径</summary>
+        <ul class="list small" style="margin-bottom:0">
+          <li><strong>半开区间</strong>：租约在 [生效日, 到期日) 内有效；同表租约链必须首尾相接，重叠或断档整批拒绝。</li>
+          <li><strong>先分段再分摊</strong>：换租日在抄表区间 [前读数日, 后读数日) 内时，用交接读数把区间切成旧租户尾段 + 新租户首段，子段再按日历月天数分摊。</li>
+          <li><strong>交接读数</strong>：换租日 total/peak/valley 三类必须齐全；与同日现场读数不一致或缺一不可，整批拒绝。</li>
+          <li><strong>双层守恒</strong>：子段合计 = 区间用量；每表每月租户账单合计 = 月度总表，差额必须 0.00 kWh。</li>
+          <li><strong>原子切换</strong>：账单落库与版本切换在同一事务；任一步失败回滚，旧 active 版本继续有效。</li>
+          <li><strong>幂等重试</strong>：相同幂等键的重试直接回放首个批次，不新增账单、不重复用量。</li>
+        </ul>
+      </details>
+    </div>
+    <div class="panel-actions">
+      <button type="submit" form="bill-form" id="bill-submit">生成并发布账单</button>
+    </div>
+  </section>
+
+  <div>
+    <div class="kpi-strip">
+      <div class="kpi"><div class="k-label">租约</div><div class="k-value">{{ leases | length }}</div><div class="k-note">覆盖 {{ meters | length }} 块表</div></div>
+      <div class="kpi"><div class="k-label">交接读数</div><div class="k-value">{{ handovers | length }}</div><div class="k-note">按换租日 × 三类登记</div></div>
+      <div class="kpi"><div class="k-label">已发布版本</div><div class="k-value">{{ versions | length }}</div><div class="k-note">{% if active_version %}当前 {{ active_version.version_id }}{% else %}暂无{% endif %}</div></div>
+      <div class="kpi"><div class="k-label">账单批次</div><div class="k-value">{{ runs | length }}</div><div class="k-note">含拒绝/试算记录</div></div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>租约台账</h2>
+        <div class="panel-actions"><span class="tag">{{ leases | length }} 条</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>表号</th><th>租户</th><th>生效日</th><th>到期日</th><th>备注</th></tr></thead>
+          <tbody>
+          {% for lease in leases | sort(attribute='meter_id') %}
+            <tr>
+              <td class="mono">{{ lease.meter_id }}</td>
+              <td>{{ lease.tenant_name }} <span class="muted small">({{ lease.tenant_id }})</span></td>
+              <td class="nowrap">{{ lease.start_date }}</td>
+              <td class="nowrap">{{ '在租' if lease.end_date == '2999-12-31' else lease.end_date }}</td>
+              <td class="small muted">{{ lease.note }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="muted">暂无租约，请先上传租约 JSON。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>交接读数</h2>
+        <div class="panel-actions"><span class="tag">{{ handovers | length }} 条</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>表号</th><th>换租日</th><th>类型</th><th class="num">读数 kWh</th></tr></thead>
+          <tbody>
+          {% for h in handovers %}
+            <tr>
+              <td class="mono">{{ h.meter_id }}</td>
+              <td class="nowrap">{{ h.handover_at }}</td>
+              <td>{{ h.kind }}</td>
+              <td class="num">{{ h.reading_kwh | num1 }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">暂无交接读数。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="result-panel">
+      <div class="panel-head">
+        <h2>批次结果</h2>
+        <div class="panel-actions" id="result-links"></div>
+      </div>
+      <div class="panel-body" id="run-empty">
+        <div class="empty" style="padding:22px 12px">
+          <strong>还没有执行本批账单</strong>
+          左侧选月份与模式后点「生成并发布账单」；成功后这里展示租户月度账单、对账结果与版本入口，被拒绝时列出全部问题。
+        </div>
+      </div>
+      <div id="run-result" hidden>
+        <div class="panel-body tight">
+          <div class="alert alert-error" id="reject-box" hidden></div>
+          <div class="kpi-strip" id="run-metrics"></div>
+          <h3>租户月度账单</h3>
+          <div class="table-wrap">
+            <table class="dense" id="bill-rows"></table>
+          </div>
+          <h3 style="margin-top:14px">账单 ↔ 月度总表对账</h3>
+          <div class="table-wrap">
+            <table class="dense" id="reconcile-rows"></table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>版本与批次流水</h2>
+        <div class="panel-actions"><span class="tag">{{ runs | length }} 个批次</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>批次</th><th>月份</th><th>状态</th><th>时间</th><th>操作</th></tr></thead>
+          <tbody>
+          {% for run in runs %}
+            <tr>
+              <td><code>{{ run.run_id }}</code></td>
+              <td>{{ run.month or '全期' }}</td>
+              <td><span class="tag {{ 'err' if run.status == 'rejected' else ('ok' if run.status == 'published' else '') }}">{{ run.status }}</span></td>
+              <td class="small muted">{{ run.created_at }}</td>
+              <td><a href="/billing/runs/{{ run.run_id }}">打开</a></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="muted">暂无批次。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>操作流水</h2></div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>时间</th><th>动作</th><th>说明</th></tr></thead>
+          <tbody>
+          {% for event in events %}
+            <tr><td class="small muted nowrap">{{ event.at }}</td><td><span class="tag">{{ event.kind }}</span></td><td class="small">{{ event.summary }}</td></tr>
+          {% else %}
+            <tr><td colspan="3" class="muted">暂无流水。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var form = document.getElementById('bill-form');
+  var errorBox = document.getElementById('bill-error');
+  var resultBox = document.getElementById('run-result');
+  var emptyBox = document.getElementById('run-empty');
+  var rejectBox = document.getElementById('reject-box');
+  var linksBox = document.getElementById('result-links');
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('button[type="submit"][form="bill-form"]'));
+
+  function num(v) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(2); }
+  function kpi(label, value, note, tone) {
+    var box = document.createElement('div');
+    box.className = 'kpi' + (tone ? ' ' + tone : '');
+    var l = document.createElement('div'); l.className = 'k-label'; l.textContent = label;
+    var vv = document.createElement('div'); vv.className = 'k-value'; vv.textContent = value;
+    box.appendChild(l); box.appendChild(vv);
+    if (note) { var n = document.createElement('div'); n.className = 'k-note'; n.textContent = note; box.appendChild(n); }
+    return box;
+  }
+
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    errorBox.hidden = true; rejectBox.hidden = true; resultBox.hidden = true;
+    var meterIds = Array.prototype.slice.call(form.querySelectorAll('input[name="meter_ids"]:checked')).map(function (i) { return i.value; });
+    var mode = (form.querySelector('input[name="mode"]:checked') || {}).value || 'publish';
+    var payload = {
+      month: form.querySelector('#bill-month').value || null,
+      meter_ids: meterIds,
+      idempotency_key: form.querySelector('#idem').value || null,
+      mode: mode
+    };
+    buttons.forEach(function (b) { b.disabled = true; });
+    try {
+      var res = await fetch(form.getAttribute('data-endpoint'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      });
+      var data = await res.json();
+      if (!res.ok) {
+        rejectBox.hidden = false;
+        var msg = data.error || ('请求失败 HTTP ' + res.status);
+        if (data.problems && data.problems.length) {
+          msg += '：' + data.problems.slice(0, 8).map(function (p) { return p.message; }).join('；');
+        }
+        rejectBox.textContent = '整批拒绝，未生成任何账单 — ' + msg;
+        emptyBox.hidden = true; resultBox.hidden = false;
+        document.getElementById('run-metrics').innerHTML = '';
+        document.getElementById('bill-rows').innerHTML = '';
+        document.getElementById('reconcile-rows').innerHTML = '';
+        linksBox.innerHTML = '';
+        return;
+      }
+      var totals = data.totals || data.stats || {};
+      var metrics = document.getElementById('run-metrics');
+      metrics.innerHTML = '';
+      metrics.appendChild(kpi('账单张数', (data.stats || {}).bills || 0, (data.replayed ? '幂等回放 · ' : '') + data.status));
+      metrics.appendChild(kpi('账单一合计 kWh', num(totals.billed_total), totals.tenants + ' 个租户 · ' + totals.meters + ' 块表'));
+      metrics.appendChild(kpi('对账不平', (data.stats || {}).reconcile_unbalanced, '必须为 0', (data.stats || {}).reconcile_unbalanced ? 'err' : 'ok'));
+      metrics.appendChild(kpi('P1 / P2 / P3', [(data.stats||{}).review_p1,(data.stats||{}).review_p2,(data.stats||{}).review_p3].join(' / '), '复核项'));
+
+      var bh = ['<thead><tr><th>月份</th><th>表号</th><th>租户</th><th class="num">总电量</th><th class="num">峰</th><th class="num">谷</th><th>分时</th></tr></thead><tbody>'];
+      (data.bills || []).forEach(function (b) {
+        bh.push('<tr><td>' + b.month + '</td><td>' + b.meter_id + '</td><td>' + b.tenant_name +
+          ' <span class="muted small">' + b.tenant_id + '</span></td><td class="num">' + num(b.total) +
+          '</td><td class="num">' + num(b.peak) + '</td><td class="num">' + num(b.valley) +
+          '</td><td>' + (b.tou.ok ? '<span class="tag ok">通过</span>' : '<span class="tag err">超差</span>') + '</td></tr>');
+      });
+      bh.push('</tbody>');
+      document.getElementById('bill-rows').innerHTML = bh.join('');
+
+      var rh = ['<thead><tr><th>月份</th><th>表号</th><th class="num">账单合计</th><th class="num">月度总表</th><th class="num">差额</th><th>租户</th><th>结论</th></tr></thead><tbody>'];
+      (data.reconcile || []).forEach(function (r) {
+        rh.push('<tr><td>' + r.month + '</td><td>' + r.meter_id + '</td><td class="num">' + num(r.billed_total) +
+          '</td><td class="num">' + num(r.master_total) + '</td><td class="num">' + num(r.diff) +
+          '</td><td class="small">' + r.tenants.join(' / ') + '</td><td>' +
+          (r.balanced ? '<span class="tag ok">平衡</span>' : '<span class="tag err">不平</span>') + '</td></tr>');
+      });
+      rh.push('</tbody>');
+      document.getElementById('reconcile-rows').innerHTML = rh.join('');
+
+      linksBox.innerHTML = '<a class="btn small" href="' + data.result_url + '">批次详情（含分段依据）</a>' +
+        '<a class="btn secondary small" href="' + data.export_url + '">账单 CSV</a>' +
+        '<a class="btn secondary small" href="/api/billing/runs/' + data.run_id + '/review.csv">复核 CSV</a>' +
+        '<a class="btn secondary small" href="/api/billing/runs/' + data.run_id + '/reconcile.csv">对账 CSV</a>' +
+        '<span class="small muted" style="align-self:center">版本 <code>' + (data.version_id || '试算未发布') + '</code></span>';
+      emptyBox.hidden = true; resultBox.hidden = false;
+    } catch (err) {
+      window.showError(errorBox, err);
+    } finally {
+      buttons.forEach(function (b) { b.disabled = false; });
+    }
+  });
+
+  ['lease-form', 'handover-form'].forEach(function (id) {
+    var f = document.getElementById(id);
+    f.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var input = f.querySelector('input[type=file]');
+      var notice = document.getElementById('import-notice');
+      var errBox = document.getElementById('import-error');
+      errBox.hidden = true; notice.hidden = true;
+      if (!input.files.length) { errBox.hidden = false; errBox.textContent = '请先选择 JSON 文件'; return; }
+      var body = new FormData(); body.append('file', input.files[0]);
+      try {
+        var res = await fetch(f.getAttribute('data-endpoint'), { method: 'POST', body: body });
+        var data = await res.json();
+        if (!res.ok) {
+          var msg = data.error || '导入失败';
+          if (data.problems) msg += '：' + data.problems.map(function (p) { return (p.index ? '第' + p.index + '条 ' : '') + p.message; }).join('；');
+          throw new Error(msg);
+        }
+        notice.hidden = false;
+        notice.textContent = '导入成功：' + (data.leases || data.handovers) + ' 条，刷新页面后生效。';
+      } catch (err) { window.showError(errBox, err); }
+    });
+  });
+})();
+</script>
+{% endblock %}

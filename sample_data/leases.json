@@ -1,0 +1,77 @@
+{
+  "description": "园区表计租约台账（按生效时段登记，半开区间 [start_date, end_date)，end_date=2999-12-31 表示在租）",
+  "leases": [
+    {
+      "meter_id": "EM-01",
+      "tenant_id": "T-A01",
+      "tenant_name": "明湖商业管理有限公司",
+      "start_date": "2025-04-01",
+      "end_date": "2025-10-01",
+      "note": "一期租约"
+    },
+    {
+      "meter_id": "EM-01",
+      "tenant_id": "T-A02",
+      "tenant_name": "云杉餐饮服务有限公司",
+      "start_date": "2025-10-01",
+      "end_date": "2999-12-31",
+      "note": "换租承接，2025-10-01 交接读数见 handovers.json"
+    },
+    {
+      "meter_id": "EM-02",
+      "tenant_id": "T-B01",
+      "tenant_name": "恒拓精密制造有限公司",
+      "start_date": "2025-04-01",
+      "end_date": "2025-07-01",
+      "note": "一期租约"
+    },
+    {
+      "meter_id": "EM-02",
+      "tenant_id": "T-B02",
+      "tenant_name": "启航机电工程有限公司",
+      "start_date": "2025-07-01",
+      "end_date": "2026-02-01",
+      "note": "二期租约，期间 2025-09-15 表计轮换（不换租户）"
+    },
+    {
+      "meter_id": "EM-02",
+      "tenant_id": "T-B03",
+      "tenant_name": "广域冷链物流有限公司",
+      "start_date": "2026-02-01",
+      "end_date": "2999-12-31",
+      "note": "三期租约（在租）"
+    },
+    {
+      "meter_id": "EM-03",
+      "tenant_id": "T-C01",
+      "tenant_name": "清凉一夏能源服务有限公司",
+      "start_date": "2025-04-01",
+      "end_date": "2025-07-01",
+      "note": "制冷季一期"
+    },
+    {
+      "meter_id": "EM-03",
+      "tenant_id": "T-C02",
+      "tenant_name": "霜叶温控科技有限公司",
+      "start_date": "2025-07-01",
+      "end_date": "2999-12-31",
+      "note": "制冷季二期（在租），2025-12-17 表计满量程回绕"
+    },
+    {
+      "meter_id": "EM-04",
+      "tenant_id": "T-D01",
+      "tenant_name": "梧桐里文创有限公司",
+      "start_date": "2025-04-01",
+      "end_date": "2026-02-01",
+      "note": "整租一期"
+    },
+    {
+      "meter_id": "EM-04",
+      "tenant_id": "T-D02",
+      "tenant_name": "星桥数字传媒有限公司",
+      "start_date": "2026-02-01",
+      "end_date": "2999-12-31",
+      "note": "换租承接（在租）"
+    }
+  ]
+}

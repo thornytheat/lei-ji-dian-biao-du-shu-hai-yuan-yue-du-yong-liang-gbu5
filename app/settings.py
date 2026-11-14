@@ -13,12 +13,14 @@ SAMPLE_DIR = Path(os.environ.get("METERCALC_SAMPLE_DIR") or (PROJECT_DIR / "samp
 READINGS_SAMPLE = SAMPLE_DIR / "readings.csv"
 METER_CHANGES_SAMPLE = SAMPLE_DIR / "meter_changes.json"
 METERS_SAMPLE = SAMPLE_DIR / "meters.json"
+LEASES_SAMPLE = SAMPLE_DIR / "leases.json"
+HANDOVERS_SAMPLE = SAMPLE_DIR / "handovers.json"
 DB_PATH = Path(os.environ.get("METERCALC_DB") or (DATA_DIR / "metercalc.sqlite3"))
 
 APP_NAME = "园区电表累计读数还原"
 APP_SHORT = "metercalc"
-SEED_VERSION = "sample-2025-04..2026-03-v1"
-SEED_SOURCE = "sample_data/readings.csv + meter_changes.json + meters.json"
+SEED_VERSION = "sample-2025-04..2026-03-v2-tenant"
+SEED_SOURCE = "sample_data/readings.csv + meter_changes.json + meters.json + leases.json + handovers.json"
 
 # 量程（回绕判定用），可由请求覆盖或按表配置覆盖
 DEFAULT_FULL_SCALE = 99999.9

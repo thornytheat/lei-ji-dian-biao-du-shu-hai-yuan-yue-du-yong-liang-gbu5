@@ -1,0 +1,23 @@
+{
+  "description": "换租交接读数（抄表员现场签认）：每个换租日每类电量一条；换租日落在抄表区间内时按交接读数把区间切成两段，分别归入前后租户",
+  "handovers": [
+    {"meter_id": "EM-01", "handover_at": "2025-10-01", "kind": "total",  "reading_kwh": 5429.1},
+    {"meter_id": "EM-01", "handover_at": "2025-10-01", "kind": "peak",   "reading_kwh": 3366.0},
+    {"meter_id": "EM-01", "handover_at": "2025-10-01", "kind": "valley", "reading_kwh": 2063.1},
+
+    {"meter_id": "EM-02", "handover_at": "2025-07-01", "kind": "total",  "reading_kwh": 2290.4},
+    {"meter_id": "EM-02", "handover_at": "2025-07-01", "kind": "peak",   "reading_kwh": 1420.0},
+    {"meter_id": "EM-02", "handover_at": "2025-07-01", "kind": "valley", "reading_kwh": 870.4},
+    {"meter_id": "EM-02", "handover_at": "2026-02-01", "kind": "total",  "reading_kwh": 2053.6},
+    {"meter_id": "EM-02", "handover_at": "2026-02-01", "kind": "peak",   "reading_kwh": 1273.2},
+    {"meter_id": "EM-02", "handover_at": "2026-02-01", "kind": "valley", "reading_kwh": 780.4},
+
+    {"meter_id": "EM-03", "handover_at": "2025-07-01", "kind": "total",  "reading_kwh": 96353.1},
+    {"meter_id": "EM-03", "handover_at": "2025-07-01", "kind": "peak",   "reading_kwh": 57811.9},
+    {"meter_id": "EM-03", "handover_at": "2025-07-01", "kind": "valley", "reading_kwh": 38541.2},
+
+    {"meter_id": "EM-04", "handover_at": "2026-02-01", "kind": "total",  "reading_kwh": 7793.7},
+    {"meter_id": "EM-04", "handover_at": "2026-02-01", "kind": "peak",   "reading_kwh": 4988.0},
+    {"meter_id": "EM-04", "handover_at": "2026-02-01", "kind": "valley", "reading_kwh": 2805.7}
+  ]
+}
